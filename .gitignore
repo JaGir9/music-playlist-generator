@@ -1,10 +1,18 @@
-# Generated media and runtime data
+# Source media (keep directory only)
 Music/*
 !Music/.gitkeep
+
+# Generated conversion cache
+Converted/*
+!Converted/.gitkeep
+
+# Generated playlists and FULL renders
 Playlists/*
 !Playlists/.gitkeep
 Full/*
 !Full/.gitkeep
+
+# Runtime
 played_tracks.json
 *.tmp
 
