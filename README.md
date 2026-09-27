@@ -1,79 +1,64 @@
 # Music Playlist Generator
 
-Professional CLI tool for generating randomized music playlists, optionally locking one or more opening tracks, creating timestamped tracklists, and rendering a full MP3 mix with FFmpeg.
+CLI playlist generator that scans **audio and video**, extracts audio from video automatically, optionally converts the whole library to a selected audio format, builds randomized/fixed-opening playlists, writes timestamped tracklists, and renders a combined FULL audio file.
 
 ## Features
 
-- Full Random mode: all tracks are randomized.
-- Custom Fixed Tracks mode: choose track #1, #2, #3, and as many opening positions as needed; the rest remain random.
+- Detects media using **FFprobe audio streams**, not only filenames/extensions.
+- Accepts common audio: MP3, WAV, FLAC, M4A, AAC, OGG, OPUS, WMA, AIFF, AC3 and other FFmpeg-readable media.
+- Accepts common video: MP4, MKV, MOV, AVI, WebM, MPEG/MPG, M4V, TS/MTS/M2TS, WMV, FLV, 3GP, VOB, OGV and other FFmpeg-readable media with audio.
+- Video with audio is automatically extracted/converted; video without a valid audio stream is skipped.
+- Conversion choices: **MP3, FLAC, WAV, AAC, M4A, OGG, OPUS**.
+- Choose whether existing audio keeps its original format or whether **all audio + video** is converted to the selected format.
+- Converted files are cached in `Converted/`; source files are never overwritten or deleted.
+- FULL playlist format is selected separately: MP3, FLAC, WAV, AAC, M4A, OGG or OPUS.
+- Full Random mode or Custom Fixed Tracks for track #1, #2, #3, etc.; remaining tracks are random.
 - Configurable playlist count and target duration.
-- Supports MP3, WAV, FLAC, M4A, AAC, OGG, OPUS, and WMA inputs.
-- Avoids reusing tracks until the current collection cycle is exhausted where possible.
-- Avoids repeating an identical playlist sequence using persistent history.
-- Generates `TRACKLIST.txt` with timestamps and `[FIXED]` labels.
-- Creates `Playlist_x_FULL.mp3` with FFmpeg.
-- Keeps the FULL MP3 inside each playlist folder and also copies it to the top-level `Full/` folder.
-- Saves playlist history to `played_tracks.json`.
-- Handles same-named files stored in different subfolders by tracking relative paths internally.
+- Persistent history reduces track reuse and identical playlist sequences where possible.
+- `TRACKLIST.txt` contains timestamps and `[FIXED]` labels.
+- FULL file is kept inside its playlist folder and copied to top-level `Full/`.
 
 ## Requirements
 
 - Python 3.9+
-- FFmpeg available in your system PATH
-- Python package: mutagen
+- FFmpeg **and FFprobe** available in PATH
 
-Install:
+No third-party Python package is required in v3.0.0.
 
-```bash
-pip install -r requirements.txt
-```
-
-Verify FFmpeg:
+Verify:
 
 ```bash
 ffmpeg -version
+ffprobe -version
 ```
 
 ## Usage
 
-1. Put audio files inside the `Music/` folder. Subfolders are supported.
+1. Put audio and/or video files in `Music/` (subfolders supported).
 2. Run `python music_playlist_generator.py`.
-3. Choose:
-   - `1` Default / Full Random
-   - `2` Custom Fixed Tracks
-4. Custom mode lets you lock track #1, #2, #3, and as many opening positions as needed.
-5. Set playlist count, target duration, and MP3 bitrate.
-6. Confirm the summary to generate the playlists.
-
-Example:
-
-```text
-[1] Default / Full Random
-[2] Custom Fixed Tracks
-Pilih mode [1]: 2
-
-Berapa lagu awal yang ingin ditentukan [1]: 3
-Pilih nomor lagu untuk posisi #1: 8
-Pilih nomor lagu untuk posisi #2: 2
-Pilih nomor lagu untuk posisi #3: 11
-```
-
-The selected opening tracks stay in that exact order; remaining positions are randomized.
+3. Choose conversion format: MP3, FLAC, WAV, AAC, M4A, OGG, or OPUS.
+4. Choose whether to keep existing audio formats or convert **ALL audio + video**.
+5. Choose Full Random or Custom Fixed Tracks.
+6. Set playlist count, target duration, and a separate FULL output format.
 
 ## Output
 
-Each playlist keeps its own FULL mix:
-
 ```text
-Playlists/Playlist_1/Playlist_1_FULL.mp3
+Music/                       # source media
+Converted/                   # conversion cache
+Playlists/
+└── Playlist_1/
+    ├── 01. song.mp3
+    ├── 02. clip.mp3
+    ├── TRACKLIST.txt
+    └── Playlist_1_FULL.flac
+Full/
+└── Playlist_1_FULL.flac
+played_tracks.json
 ```
 
-A second copy is also stored centrally:
+The target duration is a minimum target: tracks are not cut, so the generated playlist can be slightly longer.
 
-```text
-Full/Playlist_1_FULL.mp3
-```
+## Notes
 
-The target duration is a minimum target. Tracks are not cut, so the final duration can be slightly longer.
-
-Generated media and `played_tracks.json` are ignored by Git to avoid accidentally committing large files.
+FFmpeg codec availability can vary by build. The program reports a conversion/merge error if the selected encoder is unavailable. Generated media, conversion cache, and runtime history are ignored by Git.
