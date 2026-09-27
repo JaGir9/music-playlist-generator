@@ -1,361 +1,222 @@
 #!/usr/bin/env python3
-"""Music Playlist Generator - interactive randomized playlist builder."""
+"""Music Playlist Generator - audio/video scanner, converter and playlist builder."""
 
-import json
-import os
-import random
-import shutil
-import subprocess
+import json, os, random, shutil, subprocess
 from datetime import datetime
-from mutagen import File
 
 APP_NAME = "Music Playlist Generator"
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 SOURCE_DIR = "Music"
+CONVERTED_DIR = "Converted"
 OUTPUT_DIR = "Playlists"
 FULL_OUTPUT_DIR = "Full"
 LOG_FILE = "played_tracks.json"
 DEFAULT_TARGET_MINUTES = 60
-DEFAULT_MP3_BITRATE = "320k"
-SUPPORTED_EXT = (".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma")
 
+AUDIO_EXT = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".aiff", ".aif", ".ac3"}
+VIDEO_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mpeg", ".mpg", ".m4v", ".ts", ".mts", ".m2ts", ".wmv", ".flv", ".3gp", ".vob", ".ogv"}
+FORMATS = {
+    1: {"ext": "mp3", "label": "MP3", "codec": "libmp3lame", "args": ["-b:a", "320k"]},
+    2: {"ext": "flac", "label": "FLAC", "codec": "flac", "args": []},
+    3: {"ext": "wav", "label": "WAV", "codec": "pcm_s16le", "args": []},
+    4: {"ext": "aac", "label": "AAC", "codec": "aac", "args": ["-b:a", "256k"]},
+    5: {"ext": "m4a", "label": "M4A/AAC", "codec": "aac", "args": ["-b:a", "256k"]},
+    6: {"ext": "ogg", "label": "OGG/Vorbis", "codec": "libvorbis", "args": ["-q:a", "6"]},
+    7: {"ext": "opus", "label": "OPUS", "codec": "libopus", "args": ["-b:a", "192k"]},
+}
 
 def header(title=None):
-    print("\n" + "=" * 64)
-    print(f" {APP_NAME} v{VERSION}")
-    if title:
-        print(f" {title}")
-    print("=" * 64)
+    print("\n" + "=" * 68); print(f" {APP_NAME} v{VERSION}")
+    if title: print(f" {title}")
+    print("=" * 68)
 
-
-def ask_int(prompt, default=None, minimum=1):
+def ask_int(prompt, default=None, minimum=1, maximum=None):
     while True:
         suffix = f" [{default}]" if default is not None else ""
         value = input(f"{prompt}{suffix}: ").strip()
-        if not value and default is not None:
-            return default
+        if not value and default is not None: return default
         try:
-            number = int(value)
-            if number >= minimum:
-                return number
-        except ValueError:
-            pass
-        print(f"Input harus berupa angka minimal {minimum}.")
+            n = int(value)
+            if n >= minimum and (maximum is None or n <= maximum): return n
+        except ValueError: pass
+        rng = f"{minimum}-{maximum}" if maximum is not None else f">= {minimum}"
+        print(f"Input tidak valid. Masukkan angka {rng}.")
 
+def require_ffmpeg():
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        print("[ERROR] FFmpeg/ffprobe tidak ditemukan di PATH.")
+        print("Install FFmpeg terlebih dahulu lalu pastikan perintah ffmpeg dan ffprobe dapat dijalankan.")
+        return None, None
+    return ffmpeg, ffprobe
 
-def get_audio_duration(file_path):
+def probe_media(path, ffprobe):
+    cmd = [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type:format=duration", "-of", "json", os.path.abspath(path)]
     try:
-        audio = File(file_path)
-        if audio is not None and audio.info is not None:
-            return float(audio.info.length)
-    except Exception as exc:
-        print(f"[WARNING] Gagal membaca durasi '{file_path}': {exc}")
-    return 0.0
+        p = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(p.stdout or "{}")
+        if not data.get("streams"): return None
+        duration = float(data.get("format", {}).get("duration") or 0)
+        return duration if duration > 0 else None
+    except (subprocess.CalledProcessError, ValueError, json.JSONDecodeError, OSError): return None
 
-
-def scan_music_files(directory):
-    tracks = {}
-    print(f"\nMemindai folder '{directory}'...")
-    for root, _, files in os.walk(directory):
+def scan_media(directory, ffprobe):
+    items, audio_count, video_count, skipped = {}, 0, 0, 0
+    print(f"\nMemindai media di '{directory}'...")
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if d not in {CONVERTED_DIR, OUTPUT_DIR, FULL_OUTPUT_DIR, ".git"}]
         for filename in sorted(files, key=str.lower):
-            if not filename.lower().endswith(SUPPORTED_EXT):
+            path = os.path.join(root, filename); ext = os.path.splitext(filename)[1].lower()
+            kind = "audio" if ext in AUDIO_EXT else "video" if ext in VIDEO_EXT else "unknown"
+            duration = probe_media(path, ffprobe)
+            if duration is None:
+                if kind != "unknown": print(f"[SKIP] Tidak ada audio stream valid: {os.path.relpath(path, directory)}"); skipped += 1
                 continue
-            path = os.path.join(root, filename)
-            duration = get_audio_duration(path)
-            if duration <= 0:
-                continue
+            if kind == "unknown": kind = "media"
+            if kind == "video": video_count += 1
+            else: audio_count += 1
             key = os.path.relpath(path, directory)
-            tracks[key] = {"path": path, "filename": filename, "duration": duration}
-    return tracks
-
+            items[key] = {"source_path": path, "path": path, "filename": filename, "duration": duration, "kind": kind, "converted": False}
+    return items, audio_count, video_count, skipped
 
 def format_time(seconds):
-    total_ms = round(seconds * 1000)
-    whole_seconds, milliseconds = divmod(total_ms, 1000)
-    if milliseconds > 500:
-        whole_seconds += 1
-    minutes, sec = divmod(whole_seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours:02d}:{minutes:02d}:{sec:02d}"
+    sec = int(round(seconds)); h, rem = divmod(sec, 3600); m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
+def choose_format(title):
+    header(title)
+    for i, cfg in FORMATS.items(): print(f"[{i}] {cfg['label']}")
+    return FORMATS[ask_int("Pilih format", default=1, minimum=1, maximum=len(FORMATS))]
+
+def convert_one(source, destination, fmt, ffmpeg):
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", os.path.abspath(source), "-map", "0:a:0", "-vn", "-ar", "44100", "-ac", "2", "-c:a", fmt["codec"], *fmt["args"], os.path.abspath(destination)]
+    try: subprocess.run(cmd, check=True); return True
+    except (subprocess.CalledProcessError, OSError) as exc:
+        print(f"[ERROR] Konversi gagal '{source}': {exc}")
+        if os.path.exists(destination): os.remove(destination)
+        return False
+
+def prepare_media(items, conversion_format, convert_existing_audio, ffmpeg, ffprobe):
+    os.makedirs(CONVERTED_DIR, exist_ok=True); prepared = {}
+    print(f"\nMenyiapkan media -> {conversion_format['label']}...")
+    for key, info in items.items():
+        must_convert = info["kind"] == "video" or convert_existing_audio
+        if not must_convert: prepared[key] = info.copy(); continue
+        rel_no_ext = os.path.splitext(key)[0]; dest = os.path.join(CONVERTED_DIR, rel_no_ext + "." + conversion_format["ext"])
+        cached = os.path.exists(dest) and os.path.getmtime(dest) >= os.path.getmtime(info["source_path"])
+        if not cached:
+            print(f"[CONVERT] {key} -> {os.path.relpath(dest)}")
+            if not convert_one(info["source_path"], dest, conversion_format, ffmpeg): continue
+        duration = probe_media(dest, ffprobe)
+        if not duration: continue
+        new = info.copy(); new.update({"path": dest, "filename": os.path.basename(dest), "duration": duration, "converted": True}); prepared[key] = new
+    return prepared
 
 def load_history():
     if os.path.exists(LOG_FILE):
         try:
-            with open(LOG_FILE, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
+            with open(LOG_FILE, "r", encoding="utf-8") as f: data = json.load(f)
             if isinstance(data, dict) and isinstance(data.get("playlists"), list):
-                data.setdefault("current_cycle_used", [])
-                return data
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"[WARNING] Riwayat tidak dapat dibaca: {exc}")
+                data.setdefault("current_cycle_used", []); return data
+        except (OSError, json.JSONDecodeError) as exc: print(f"[WARNING] Riwayat gagal dibaca: {exc}")
     return {"playlists": [], "current_cycle_used": []}
 
-
 def save_history(data):
-    temp_path = LOG_FILE + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=4, ensure_ascii=False)
-    os.replace(temp_path, LOG_FILE)
-
+    tmp = LOG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f: json.dump(data, f, indent=4, ensure_ascii=False)
+    os.replace(tmp, LOG_FILE)
 
 def display_tracks(tracks):
-    keys = list(tracks.keys())
-    print("\nDaftar lagu:")
-    for index, key in enumerate(keys, 1):
-        info = tracks[key]
-        print(f"  [{index:>3}] {key}  ({format_time(info['duration'])})")
+    keys = list(tracks); print("\nDaftar lagu/media:")
+    for i, key in enumerate(keys, 1):
+        info = tracks[key]; flag = "CONVERTED" if info["converted"] else info["kind"].upper()
+        print(f" [{i:>3}] {key} ({format_time(info['duration'])}) [{flag}]")
     return keys
 
-
 def choose_fixed_tracks(tracks):
-    header("PENGATURAN URUTAN LAGU")
-    print("[1] Default / Full Random")
-    print("    Semua posisi lagu diacak otomatis.")
-    print("[2] Custom Fixed Tracks")
-    print("    Tentukan lagu posisi 1, 2, 3, dst.; sisanya tetap random.")
-    mode = ask_int("Pilih mode", default=1, minimum=1)
-    while mode not in (1, 2):
-        print("Pilihan hanya 1 atau 2.")
-        mode = ask_int("Pilih mode", default=1, minimum=1)
-
-    if mode == 1:
-        return [], "default_random"
-
-    keys = display_tracks(tracks)
-    count = ask_int("Berapa lagu awal yang ingin ditentukan", default=1, minimum=1)
-    count = min(count, len(keys))
-    selected = []
-    for position in range(1, count + 1):
+    header("PENGATURAN URUTAN LAGU"); print("[1] Default / Full Random\n[2] Custom Fixed Tracks - tentukan posisi awal, sisanya random")
+    mode = ask_int("Pilih mode", default=1, minimum=1, maximum=2)
+    if mode == 1: return [], "default_random"
+    keys = display_tracks(tracks); count = min(ask_int("Berapa lagu awal yang ingin ditentukan", default=1), len(keys)); selected = []
+    for pos in range(1, count + 1):
         while True:
-            choice = ask_int(f"Pilih nomor lagu untuk posisi #{position}", minimum=1)
-            if choice > len(keys):
-                print("Nomor lagu tidak tersedia.")
-                continue
-            key = keys[choice - 1]
-            if key in selected:
-                print("Lagu tersebut sudah dipilih. Pilih lagu lain.")
-                continue
-            selected.append(key)
-            print(f"  Posisi #{position}: {key}")
-            break
+            choice = ask_int(f"Pilih nomor lagu untuk posisi #{pos}", minimum=1, maximum=len(keys)); key = keys[choice - 1]
+            if key in selected: print("Lagu sudah dipilih. Pilih yang lain."); continue
+            selected.append(key); print(f" Posisi #{pos}: {key}"); break
     return selected, "custom_fixed"
 
+def build_selection(tracks, fixed, target, cycle_used):
+    selected = list(fixed); selected_set = set(selected); cycle = set(cycle_used); cycle.update(fixed)
+    duration = sum(tracks[k]["duration"] for k in selected)
+    while duration < target:
+        pool = [k for k in tracks if k not in cycle and k not in selected_set]
+        if not pool: pool = [k for k in tracks if k not in selected_set]; cycle = set(fixed)
+        if not pool: break
+        k = random.choice(pool); selected.append(k); selected_set.add(k); cycle.add(k); duration += tracks[k]["duration"]
+    return selected, duration, cycle
 
-def merge_tracks_to_mp3(track_paths, output_path, bitrate):
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        print("[ERROR] FFmpeg tidak ditemukan di PATH. File FULL tidak dibuat.")
-        return False
-    if not track_paths:
-        return False
-
-    filters = []
-    for index in range(len(track_paths)):
-        filters.append(
-            f"[{index}:a:0]aresample=44100,aformat=sample_fmts=fltp:"
-            f"channel_layouts=stereo,asetpts=PTS-STARTPTS[a{index}]"
-        )
-    labels = "".join(f"[a{i}]" for i in range(len(track_paths)))
-    filters.append(f"{labels}concat=n={len(track_paths)}:v=0:a=1[outa]")
-
-    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
-    for path in track_paths:
-        command.extend(["-i", os.path.abspath(path)])
-    command.extend([
-        "-filter_complex", ";".join(filters), "-map", "[outa]",
-        "-c:a", "libmp3lame", "-b:a", bitrate,
-        "-id3v2_version", "3", "-f", "mp3", os.path.abspath(output_path),
-    ])
-
-    print(f"Menggabungkan {len(track_paths)} lagu -> {os.path.basename(output_path)}")
-    try:
-        subprocess.run(command, check=True)
-        print(f"[OK] File FULL berhasil: {output_path}")
-        return True
+def merge_tracks(paths, output, fmt, ffmpeg):
+    if not paths: return False
+    filters = [f"[{i}:a:0]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[a{i}]" for i in range(len(paths))]
+    filters.append("".join(f"[a{i}]" for i in range(len(paths))) + f"concat=n={len(paths)}:v=0:a=1[outa]")
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    for p in paths: cmd += ["-i", os.path.abspath(p)]
+    cmd += ["-filter_complex", ";".join(filters), "-map", "[outa]", "-c:a", fmt["codec"], *fmt["args"], os.path.abspath(output)]
+    print(f"Menggabungkan {len(paths)} lagu -> {os.path.basename(output)}")
+    try: subprocess.run(cmd, check=True); return True
     except (subprocess.CalledProcessError, OSError) as exc:
-        print(f"[ERROR] Gagal menjalankan FFmpeg: {exc}")
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        print(f"[ERROR] Merge gagal: {exc}")
+        if os.path.exists(output): os.remove(output)
         return False
-
 
 def next_playlist_index():
-    if not os.path.isdir(OUTPUT_DIR):
-        return 1
-    numbers = []
-    for name in os.listdir(OUTPUT_DIR):
-        if name.startswith("Playlist_"):
-            suffix = name.split("_", 1)[1]
-            if suffix.isdigit():
-                numbers.append(int(suffix))
-    return max(numbers, default=0) + 1
+    if not os.path.isdir(OUTPUT_DIR): return 1
+    nums = [int(n.split("_",1)[1]) for n in os.listdir(OUTPUT_DIR) if n.startswith("Playlist_") and n.split("_",1)[1].isdigit()]
+    return max(nums, default=0) + 1
 
-
-def build_track_selection(all_tracks, fixed_tracks, target_seconds, cycle_used):
-    selected = list(fixed_tracks)
-    selected_set = set(selected)
-    temp_cycle_used = set(cycle_used)
-    current_duration = sum(all_tracks[name]["duration"] for name in selected)
-    temp_cycle_used.update(selected)
-
-    while current_duration < target_seconds:
-        unplayed_pool = [
-            name for name in all_tracks
-            if name not in temp_cycle_used and name not in selected_set
-        ]
-        if unplayed_pool:
-            chosen = random.choice(unplayed_pool)
-        else:
-            fallback_pool = [name for name in all_tracks if name not in selected_set]
-            if not fallback_pool:
-                break
-            temp_cycle_used = set(fixed_tracks)
-            chosen = random.choice(fallback_pool)
-
-        selected.append(chosen)
-        selected_set.add(chosen)
-        temp_cycle_used.add(chosen)
-        current_duration += all_tracks[chosen]["duration"]
-
-    return selected, current_duration, temp_cycle_used
-
-
-def create_playlist(all_tracks, fixed_tracks, target_seconds, bitrate,
-                    playlist_index, history, cycle_used, mode_name):
-    playlist_name = f"Playlist_{playlist_index}"
-    playlist_folder = os.path.join(OUTPUT_DIR, playlist_name)
-    os.makedirs(playlist_folder, exist_ok=True)
-
-    past_signatures = {tuple(item.get("tracks", [])) for item in history}
-    attempt = 0
-    while True:
-        attempt += 1
-        selected, duration, candidate_cycle = build_track_selection(
-            all_tracks, fixed_tracks, target_seconds, cycle_used
-        )
-        if tuple(selected) not in past_signatures or attempt >= 100:
-            break
-
-    tracklist = [
-        f"===> {playlist_name}", f"Mode: {mode_name}",
-        f"Target: {format_time(target_seconds)}", "", "TRACKLIST:",
-    ]
-    elapsed = 0.0
-    ordered_paths = []
-
-    for index, track_key in enumerate(selected, 1):
-        source = all_tracks[track_key]["path"]
-        filename = all_tracks[track_key]["filename"]
-        base, ext = os.path.splitext(filename)
-        destination = os.path.join(playlist_folder, f"{index:02d}. {base}{ext}")
-        shutil.copy2(source, destination)
-        ordered_paths.append(destination)
-        fixed_label = " [FIXED]" if index <= len(fixed_tracks) else ""
-        tracklist.append(f"{format_time(elapsed)} - {base}{fixed_label}")
-        elapsed += all_tracks[track_key]["duration"]
-
-    with open(os.path.join(playlist_folder, "TRACKLIST.txt"), "w", encoding="utf-8") as handle:
-        handle.write("\n".join(tracklist) + "\n")
-
-    merged_filename = f"{playlist_name}_FULL.mp3"
-    merged_path = os.path.join(playlist_folder, merged_filename)
-    merged_ok = merge_tracks_to_mp3(ordered_paths, merged_path, bitrate)
-
-    full_copy = None
-    if merged_ok:
-        os.makedirs(FULL_OUTPUT_DIR, exist_ok=True)
-        full_copy = os.path.join(FULL_OUTPUT_DIR, merged_filename)
-        shutil.copy2(merged_path, full_copy)
-        print(f"[OK] Salinan FULL: {full_copy}")
-
-    entry = {
-        "playlist_name": playlist_name, "mode": mode_name,
-        "fixed_tracks": fixed_tracks, "tracks": selected,
-        "total_tracks": len(selected), "target_duration": target_seconds,
-        "total_duration": round(duration, 2),
-        "formatted_duration": format_time(duration),
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "merged_mp3": merged_filename if merged_ok else None,
-        "full_copy": full_copy,
-    }
-    return entry, candidate_cycle
-
+def create_playlist(tracks, fixed, target, full_fmt, index, history, cycle, mode, ffmpeg):
+    name = f"Playlist_{index}"; folder = os.path.join(OUTPUT_DIR, name); os.makedirs(folder, exist_ok=True)
+    past = {tuple(x.get("tracks", [])) for x in history}
+    for attempt in range(100):
+        selected, duration, candidate_cycle = build_selection(tracks, fixed, target, cycle)
+        if tuple(selected) not in past or attempt == 99: break
+    lines = [f"===> {name}", f"Mode: {mode}", f"Target: {format_time(target)}", "", "TRACKLIST:"]; elapsed, ordered = 0.0, []
+    for i, key in enumerate(selected, 1):
+        src = tracks[key]["path"]; base, ext = os.path.splitext(os.path.basename(src)); dst = os.path.join(folder, f"{i:02d}. {base}{ext}")
+        shutil.copy2(src, dst); ordered.append(dst); lines.append(f"{format_time(elapsed)} - {base}" + (" [FIXED]" if i <= len(fixed) else "")); elapsed += tracks[key]["duration"]
+    with open(os.path.join(folder, "TRACKLIST.txt"), "w", encoding="utf-8") as f: f.write("\n".join(lines) + "\n")
+    merged_name = f"{name}_FULL.{full_fmt['ext']}"; merged = os.path.join(folder, merged_name); ok = merge_tracks(ordered, merged, full_fmt, ffmpeg); full_copy = None
+    if ok:
+        os.makedirs(FULL_OUTPUT_DIR, exist_ok=True); full_copy = os.path.join(FULL_OUTPUT_DIR, merged_name); shutil.copy2(merged, full_copy)
+        print(f"[OK] FULL: {merged}\n[OK] Salinan: {full_copy}")
+    return {"playlist_name": name, "mode": mode, "fixed_tracks": fixed, "tracks": selected, "total_tracks": len(selected), "target_duration": target, "total_duration": round(duration,2), "formatted_duration": format_time(duration), "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "full_format": full_fmt["ext"], "merged_file": merged_name if ok else None, "full_copy": full_copy}, candidate_cycle
 
 def main():
-    header()
-    print("Random playlist generator dengan fixed opening tracks + FFmpeg FULL mix.")
-
-    if not os.path.isdir(SOURCE_DIR):
-        os.makedirs(SOURCE_DIR, exist_ok=True)
-        print(f"\nFolder '{SOURCE_DIR}' belum berisi koleksi musik.")
-        print(f"Masukkan file audio ke folder '{SOURCE_DIR}', lalu jalankan kembali.")
-        return
-
-    all_tracks = scan_music_files(SOURCE_DIR)
-    if not all_tracks:
-        print("Tidak ada file audio valid yang ditemukan.")
-        return
-    print(f"[OK] Total lagu terdeteksi: {len(all_tracks)}")
-
-    fixed_tracks, mode_name = choose_fixed_tracks(all_tracks)
-
-    header("PENGATURAN PLAYLIST")
-    num_playlists = ask_int("Mau buat berapa playlist", default=1)
-    target_minutes = ask_int("Target durasi per playlist (menit)", default=DEFAULT_TARGET_MINUTES)
-    target_seconds = target_minutes * 60
-
-    print("\nKualitas MP3 FULL:")
-    print("[1] 320 kbps (Default / Recommended)")
-    print("[2] 256 kbps")
-    print("[3] 192 kbps")
-    quality = ask_int("Pilih kualitas", default=1)
-    bitrate = {1: "320k", 2: "256k", 3: "192k"}.get(quality, DEFAULT_MP3_BITRATE)
-
-    header("RINGKASAN")
-    print(f"Mode            : {mode_name}")
-    print(f"Fixed tracks    : {len(fixed_tracks)}")
-    for idx, name in enumerate(fixed_tracks, 1):
-        print(f"  #{idx:<2}           : {name}")
-    print(f"Jumlah playlist : {num_playlists}")
-    print(f"Target durasi   : {target_minutes} menit")
-    print(f"MP3 bitrate     : {bitrate}")
-    print(f"Output playlist : {OUTPUT_DIR}/Playlist_x/")
-    print(f"Salinan FULL    : {FULL_OUTPUT_DIR}/")
-
-    confirm = input("\nMulai proses? [Y/n]: ").strip().lower()
-    if confirm not in ("", "y", "yes", "ya"):
-        print("Dibatalkan.")
-        return
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(FULL_OUTPUT_DIR, exist_ok=True)
-    history_data = load_history()
-    history = history_data.get("playlists", [])
-    cycle_used = set(history_data.get("current_cycle_used", []))
-    index = next_playlist_index()
-
-    for _ in range(num_playlists):
-        header(f"MEMBUAT Playlist_{index}")
-        entry, cycle_used = create_playlist(
-            all_tracks, fixed_tracks, target_seconds, bitrate,
-            index, history, cycle_used, mode_name
-        )
-        history.append(entry)
-        history_data["playlists"] = history
-        history_data["current_cycle_used"] = sorted(cycle_used)
-        save_history(history_data)
-        print(f"[DONE] {entry['playlist_name']} | {entry['formatted_duration']} | {entry['total_tracks']} lagu")
-        index += 1
-
-    header("SELESAI")
-    print(f"Playlist lengkap : {OUTPUT_DIR}/")
-    print(f"Salinan MP3 FULL : {FULL_OUTPUT_DIR}/")
-    print(f"Riwayat          : {LOG_FILE}")
-
+    header(); print("Deteksi audio/video + konversi otomatis + playlist random/fixed + FULL mix.")
+    ffmpeg, ffprobe = require_ffmpeg()
+    if not ffmpeg: return
+    os.makedirs(SOURCE_DIR, exist_ok=True); raw, ac, vc, skipped = scan_media(SOURCE_DIR, ffprobe)
+    if not raw: print(f"Tidak ada media dengan audio stream di '{SOURCE_DIR}'."); return
+    print(f"[OK] Audio/media: {ac} | Video: {vc} | Total: {len(raw)} | Skip: {skipped}")
+    conversion_fmt = choose_format("FORMAT KONVERSI MEDIA")
+    header("FILE AUDIO YANG SUDAH ADA"); print("[1] Pertahankan format audio asli (video tetap dikonversi)\n[2] Convert SEMUA audio + video ke format yang dipilih")
+    convert_all = ask_int("Pilih", default=1, minimum=1, maximum=2) == 2
+    prepared = prepare_media(raw, conversion_fmt, convert_all, ffmpeg, ffprobe)
+    if not prepared: print("Tidak ada media yang berhasil disiapkan."); return
+    fixed, mode = choose_fixed_tracks(prepared); header("PENGATURAN PLAYLIST")
+    count = ask_int("Mau buat berapa playlist", default=1); minutes = ask_int("Target durasi per playlist (menit)", default=DEFAULT_TARGET_MINUTES); target = minutes * 60
+    full_fmt = choose_format("FORMAT FILE FULL PLAYLIST")
+    header("RINGKASAN"); print(f"Media siap       : {len(prepared)}\nFormat konversi  : {conversion_fmt['label']}\nAudio asli       : {'ikut dikonversi' if convert_all else 'dipertahankan'}\nMode playlist    : {mode}\nFixed tracks     : {len(fixed)}\nJumlah playlist  : {count}\nTarget durasi    : {minutes} menit\nFormat FULL      : {full_fmt['label']}\nConverted        : {CONVERTED_DIR}/\nPlaylist         : {OUTPUT_DIR}/\nSalinan FULL     : {FULL_OUTPUT_DIR}/")
+    if input("\nMulai proses? [Y/n]: ").strip().lower() not in ("", "y", "yes", "ya"): print("Dibatalkan."); return
+    os.makedirs(OUTPUT_DIR, exist_ok=True); os.makedirs(FULL_OUTPUT_DIR, exist_ok=True)
+    data = load_history(); history = data.get("playlists", []); cycle = set(data.get("current_cycle_used", [])); idx = next_playlist_index()
+    for _ in range(count):
+        header(f"MEMBUAT Playlist_{idx}"); entry, cycle = create_playlist(prepared, fixed, target, full_fmt, idx, history, cycle, mode, ffmpeg)
+        history.append(entry); data["playlists"] = history; data["current_cycle_used"] = sorted(cycle); save_history(data)
+        print(f"[DONE] {entry['playlist_name']} | {entry['formatted_duration']} | {entry['total_tracks']} lagu"); idx += 1
+    header("SELESAI"); print(f"Converted : {CONVERTED_DIR}/\nPlaylists : {OUTPUT_DIR}/\nFull      : {FULL_OUTPUT_DIR}/\nRiwayat   : {LOG_FILE}")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n\nProses dibatalkan oleh pengguna.")
+    try: main()
+    except KeyboardInterrupt: print("\n\nProses dibatalkan oleh pengguna.")
