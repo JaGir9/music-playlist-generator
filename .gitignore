@@ -1,0 +1,21 @@
+# Generated media and runtime data
+Music/*
+!Music/.gitkeep
+Playlists/*
+!Playlists/.gitkeep
+Full/*
+!Full/.gitkeep
+played_tracks.json
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
